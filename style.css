@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0b1020" />
+  <title>VoxLink — P2P Call</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">V</div>
+        <div>
+          <div class="brand-name">VoxLink</div>
+          <div class="brand-sub">P2P Call</div>
+        </div>
+      </div>
+
+      <div class="room-center">
+        <button id="roomBadge" class="room-badge" title="ルームリンクをコピー">
+          <span class="status-dot"></span>
+          <span id="roomLabel">未接続</span>
+          <span class="copy-glyph">⧉</span>
+        </button>
+      </div>
+
+      <div class="top-actions">
+        <button id="inviteBtn" class="soft-btn">🔗 招待</button>
+        <button id="settingsBtn" class="icon-btn" title="設定">⚙</button>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <section class="stage">
+        <div id="emptyState" class="empty-state">
+          <div class="hero-orb">✦</div>
+          <h1>プライベートなP2P通話</h1>
+          <p>映像と音声は端末同士で直接接続。画面共有、チャット、ファイル送信までこの部屋にまとめられます。</p>
+          <div class="feature-row">
+            <span>🔒 WebRTC</span>
+            <span>🖥 画面共有</span>
+            <span>💬 チャット</span>
+            <span>📁 ファイル</span>
+          </div>
+          <button id="startBtn" class="primary-btn big">通話を開始</button>
+          <div class="small-note">localhost / HTTPS 環境ではカメラ・マイク・画面共有を利用できます。</div>
+        </div>
+
+        <div id="callStage" class="call-stage hidden">
+          <div class="stage-toolbar">
+            <div class="stage-title">
+              <span id="participantCount">0人</span>
+              <span class="muted">P2P接続</span>
+            </div>
+            <div class="stage-actions">
+              <button id="layoutBtn" class="soft-btn">⊞ レイアウト</button>
+              <button id="recordBtn" class="soft-btn">● 録画</button>
+            </div>
+          </div>
+          <div id="videoGrid" class="video-grid" data-layout="grid"></div>
+          <div id="reactions" class="reaction-float"></div>
+          <div id="toastStack" class="toast-stack"></div>
+        </div>
+      </section>
+
+      <aside id="sidePanel" class="side-panel">
+        <div class="panel-tabs">
+          <button class="tab active" data-tab="chat">チャット</button>
+          <button class="tab" data-tab="files">ファイル</button>
+          <button class="tab" data-tab="people">参加者</button>
+        </div>
+
+        <section id="tab-chat" class="tab-panel active">
+          <div id="chatMessages" class="chat-messages">
+            <div class="system-message">ルームに参加すると、ここでメッセージを交換できます。</div>
+          </div>
+          <div class="chat-compose">
+            <input id="chatInput" type="text" maxlength="1000" placeholder="メッセージを入力…" />
+            <button id="sendChatBtn" class="send-btn">➤</button>
+          </div>
+        </section>
+
+        <section id="tab-files" class="tab-panel">
+          <div class="file-head">
+            <div>
+              <h3>P2Pファイル送信</h3>
+              <p>ファイルはサーバーを経由せず、参加者へ直接送信します。</p>
+            </div>
+            <button id="fileBtn" class="primary-btn">📎 送る</button>
+            <input id="fileInput" type="file" hidden />
+          </div>
+          <div id="fileTransfers" class="file-transfers"></div>
+        </section>
+
+        <section id="tab-people" class="tab-panel">
+          <div class="people-head">
+            <h3>参加者</h3>
+            <span id="peopleCount" class="count-pill">0</span>
+          </div>
+          <div id="peopleList" class="people-list"></div>
+        </section>
+      </aside>
+    </main>
+
+    <div id="controlBar" class="control-bar hidden">
+      <div class="control-cluster">
+        <button id="micBtn" class="control-btn" title="マイク">🎙</button>
+        <button id="camBtn" class="control-btn" title="カメラ">▣</button>
+        <button id="screenBtn" class="control-btn wide" title="画面共有">🖥 画面共有</button>
+      </div>
+      <button id="leaveBtn" class="hangup-btn">終了</button>
+      <div class="control-cluster">
+        <button id="reactionBtn" class="control-btn">😊</button>
+        <button id="pipBtn" class="control-btn">▣</button>
+        <button id="fullscreenBtn" class="control-btn">⛶</button>
+      </div>
+    </div>
+
+    <div id="joinModal" class="modal-backdrop hidden">
+      <div class="modal">
+        <div class="modal-head">
+          <div>
+            <div class="eyebrow">START A PRIVATE ROOM</div>
+            <h2>通話ルームを作る</h2>
+          </div>
+          <button id="closeJoinBtn" class="icon-btn">×</button>
+        </div>
+
+        <label class="field">
+          <span>表示名</span>
+          <input id="nameInput" type="text" maxlength="40" placeholder="あなたの名前" />
+        </label>
+        <label class="field">
+          <span>ルームID</span>
+          <div class="room-input-row">
+            <input id="roomInput" type="text" maxlength="64" placeholder="例: project-echo" />
+            <button id="randomRoomBtn" class="soft-btn">ランダム</button>
+          </div>
+        </label>
+
+        <div class="device-preview">
+          <div class="preview-card">
+            <video id="previewVideo" autoplay muted playsinline></video>
+            <div class="preview-label">カメラプレビュー</div>
+          </div>
+          <div class="preview-copy">
+            <strong>接続前チェック</strong>
+            <span>カメラ・マイクの許可を確認してから通話へ参加します。</span>
+          </div>
+        </div>
+
+        <button id="joinBtn" class="primary-btn big full">ルームへ参加</button>
+        <p class="modal-foot">共有リンクはブラウザのURLにも反映されます。</p>
+      </div>
+    </div>
+
+    <div id="settingsModal" class="modal-backdrop hidden">
+      <div class="modal">
+        <div class="modal-head">
+          <div>
+            <div class="eyebrow">CALL SETTINGS</div>
+            <h2>デバイス設定</h2>
+          </div>
+          <button id="closeSettingsBtn" class="icon-btn">×</button>
+        </div>
+
+        <label class="field">
+          <span>マイク</span>
+          <select id="micSelect"></select>
+        </label>
+        <label class="field">
+          <span>カメラ</span>
+          <select id="camSelect"></select>
+        </label>
+        <label class="field">
+          <span>スピーカー</span>
+          <select id="speakerSelect"></select>
+        </label>
+
+        <div class="settings-actions">
+          <button id="applyDevicesBtn" class="primary-btn">適用</button>
+        </div>
+        <p class="modal-foot">スピーカー切替は対応ブラウザでのみ有効です。</p>
+      </div>
+    </div>
+
+    <input id="fileInputDirect" type="file" hidden />
+  </div>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

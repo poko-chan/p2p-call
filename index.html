@@ -1,1 +1,853 @@
+(() => {
+  "use strict";
 
+  const qs = (id) => document.getElementById(id);
+  const els = {
+    emptyState: qs("emptyState"),
+    callStage: qs("callStage"),
+    videoGrid: qs("videoGrid"),
+    controlBar: qs("controlBar"),
+    startBtn: qs("startBtn"),
+    joinModal: qs("joinModal"),
+    closeJoinBtn: qs("closeJoinBtn"),
+    joinBtn: qs("joinBtn"),
+    nameInput: qs("nameInput"),
+    roomInput: qs("roomInput"),
+    randomRoomBtn: qs("randomRoomBtn"),
+    previewVideo: qs("previewVideo"),
+    roomLabel: qs("roomLabel"),
+    roomBadge: qs("roomBadge"),
+    inviteBtn: qs("inviteBtn"),
+    settingsBtn: qs("settingsBtn"),
+    settingsModal: qs("settingsModal"),
+    closeSettingsBtn: qs("closeSettingsBtn"),
+    micSelect: qs("micSelect"),
+    camSelect: qs("camSelect"),
+    speakerSelect: qs("speakerSelect"),
+    applyDevicesBtn: qs("applyDevicesBtn"),
+    micBtn: qs("micBtn"),
+    camBtn: qs("camBtn"),
+    screenBtn: qs("screenBtn"),
+    leaveBtn: qs("leaveBtn"),
+    reactionBtn: qs("reactionBtn"),
+    pipBtn: qs("pipBtn"),
+    fullscreenBtn: qs("fullscreenBtn"),
+    chatMessages: qs("chatMessages"),
+    chatInput: qs("chatInput"),
+    sendChatBtn: qs("sendChatBtn"),
+    fileBtn: qs("fileBtn"),
+    fileInput: qs("fileInput"),
+    fileTransfers: qs("fileTransfers"),
+    participantCount: qs("participantCount"),
+    peopleCount: qs("peopleCount"),
+    peopleList: qs("peopleList"),
+    toastStack: qs("toastStack"),
+    reactions: qs("reactions"),
+    layoutBtn: qs("layoutBtn"),
+    recordBtn: qs("recordBtn"),
+  };
+
+  const state = {
+    ws: null,
+    room: "",
+    name: "Guest",
+    peerId: "",
+    localStream: null,
+    screenStream: null,
+    cameraTrack: null,
+    micTrack: null,
+    peers: new Map(),
+    pendingFiles: new Map(),
+    recording: null,
+    layout: "grid",
+    devices: { microphoneId: "", cameraId: "", speakerId: "" }
+  };
+
+  const rtcConfig = {
+    iceServers: [
+      { urls: "stun:stun.l.google.com:19302" },
+      { urls: "stun:stun1.l.google.com:19302" }
+    ],
+    bundlePolicy: "max-bundle"
+  };
+
+  function showToast(message, ms = 3000) {
+    const div = document.createElement("div");
+    div.className = "toast";
+    div.textContent = message;
+    els.toastStack.appendChild(div);
+    setTimeout(() => div.remove(), ms);
+  }
+
+  function randomId(prefix = "") {
+    return prefix + Math.random().toString(36).slice(2, 9);
+  }
+
+  function displayName(peerId) {
+    if (peerId === state.peerId) return state.name;
+    return state.peers.get(peerId)?.name || "参加者";
+  }
+
+  function sendSignal(peerId, payload) {
+    if (!state.ws || state.ws.readyState !== WebSocket.OPEN) return;
+    state.ws.send(JSON.stringify({ type: "signal", to: peerId, payload }));
+  }
+
+  function addChat(name, text, system = false) {
+    if (system) {
+      const el = document.createElement("div");
+      el.className = "system-message";
+      el.textContent = text;
+      els.chatMessages.appendChild(el);
+    } else {
+      const item = document.createElement("div");
+      item.className = "chat-item";
+      const initial = (name || "?").trim().charAt(0).toUpperCase();
+      const time = new Date().toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit" });
+      item.innerHTML = `
+        <div class="avatar"></div>
+        <div class="chat-body">
+          <div class="chat-top"><span class="chat-name"></span><span class="chat-time"></span></div>
+          <div class="chat-text"></div>
+        </div>`;
+      item.querySelector(".avatar").textContent = initial;
+      item.querySelector(".chat-name").textContent = name || "参加者";
+      item.querySelector(".chat-time").textContent = time;
+      item.querySelector(".chat-text").textContent = text;
+      els.chatMessages.appendChild(item);
+    }
+    els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+  }
+
+  function updateCounts() {
+    const n = state.peers.size + (state.localStream ? 1 : 0);
+    els.participantCount.textContent = `${n}人`;
+    els.peopleCount.textContent = String(n);
+    renderPeople();
+  }
+
+  function renderPeople() {
+    els.peopleList.innerHTML = "";
+    const people = [{ peerId: state.peerId, name: state.name, self: true }, ...[...state.peers.values()]];
+    for (const person of people) {
+      const row = document.createElement("div");
+      row.className = "person";
+      row.innerHTML = `
+        <div class="avatar"></div>
+        <div>
+          <div class="chat-name"></div>
+          <div class="muted">${person.self ? "あなた" : "接続中"}</div>
+        </div>
+        <span class="person-dot"></span>`;
+      row.querySelector(".avatar").textContent = (person.name || "?").charAt(0).toUpperCase();
+      row.querySelector(".chat-name").textContent = person.name || "参加者";
+      els.peopleList.appendChild(row);
+    }
+  }
+
+  function tileFor(peerId, videoEl, name, local = false) {
+    let tile = document.querySelector(`[data-peer-tile="${peerId}"]`);
+    if (!tile) {
+      tile = document.createElement("div");
+      tile.className = `video-tile ${local ? "local" : ""}`;
+      tile.dataset.peerTile = peerId;
+      tile.innerHTML = `
+        <video autoplay playsinline ${local ? "muted" : ""}></video>
+        <div class="video-meta">
+          <span class="name-chip"></span>
+          <div class="tile-badges"></div>
+        </div>`;
+      els.videoGrid.appendChild(tile);
+    }
+    const video = tile.querySelector("video");
+    if (videoEl && video.srcObject !== videoEl.srcObject) video.srcObject = videoEl.srcObject;
+    tile.querySelector(".name-chip").textContent = local ? `${name}（あなた）` : name;
+    return tile;
+  }
+
+  function addLocalTile() {
+    if (!state.localStream) return;
+    const existing = document.querySelector(`[data-peer-tile="local"]`);
+    let tile = existing;
+    if (!tile) {
+      tile = document.createElement("div");
+      tile.className = "video-tile local";
+      tile.dataset.peerTile = "local";
+      tile.innerHTML = `
+        <video autoplay muted playsinline></video>
+        <div class="video-meta"><span class="name-chip"></span><div class="tile-badges"></div></div>`;
+      els.videoGrid.prepend(tile);
+    }
+    tile.querySelector("video").srcObject = state.localStream;
+    tile.querySelector(".name-chip").textContent = `${state.name}（あなた）`;
+  }
+
+  function removePeer(peerId) {
+    const info = state.peers.get(peerId);
+    try { info?.pc?.close(); } catch {}
+    state.peers.delete(peerId);
+    document.querySelector(`[data-peer-tile="${peerId}"]`)?.remove();
+    updateCounts();
+  }
+
+  function openDataChannel(info, channel) {
+    if (channel.label === "chat") {
+      info.chat = channel;
+      channel.onopen = () => {};
+      channel.onmessage = (e) => {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === "chat") addChat(msg.name, msg.text);
+          if (msg.type === "reaction") showReaction(msg.emoji);
+          if (msg.type === "file-meta") prepareIncomingFile(info, msg);
+          if (msg.type === "file-end") finishIncomingFile(msg, info);
+        } catch {
+          // Ignore malformed data-channel packets.
+        }
+      };
+    }
+    if (channel.label === "file") {
+      info.file = channel;
+      channel.binaryType = "arraybuffer";
+      channel.onmessage = (e) => {
+        if (typeof e.data === "string") {
+          try {
+            const msg = JSON.parse(e.data);
+            if (msg.type === "file-meta") prepareIncomingFile(info, msg);
+            if (msg.type === "file-end") finishIncomingFile(msg, info);
+          } catch {}
+        } else {
+          handleBinary(info, e.data);
+        }
+      };
+    }
+  }
+
+  function createPeer(peerId, name, initiator) {
+    if (state.peers.has(peerId)) return state.peers.get(peerId);
+
+    const pc = new RTCPeerConnection(rtcConfig);
+    const info = { peerId, name: name || "参加者", pc, chat: null, file: null, incoming: new Map() };
+    state.peers.set(peerId, info);
+
+    if (state.localStream) {
+      for (const track of state.localStream.getTracks()) pc.addTrack(track, state.localStream);
+    }
+
+    pc.ontrack = (event) => {
+      const stream = event.streams[0];
+      if (!stream) return;
+      let tile = document.querySelector(`[data-peer-tile="${peerId}"]`);
+      if (!tile) {
+        tile = document.createElement("div");
+        tile.className = "video-tile";
+        tile.dataset.peerTile = peerId;
+        tile.innerHTML = `<video autoplay playsinline></video><div class="video-meta"><span class="name-chip"></span><div class="tile-badges"></div></div>`;
+        els.videoGrid.appendChild(tile);
+      }
+      tile.querySelector("video").srcObject = stream;
+      tile.querySelector(".name-chip").textContent = info.name;
+    };
+
+    pc.onicecandidate = (event) => {
+      if (event.candidate) sendSignal(peerId, { type: "candidate", candidate: event.candidate });
+    };
+
+    pc.onconnectionstatechange = () => {
+      if (["failed", "closed", "disconnected"].includes(pc.connectionState)) {
+        if (pc.connectionState === "failed") showToast(`${info.name} との接続を再試行します`);
+      }
+    };
+
+    if (initiator) {
+      const chat = pc.createDataChannel("chat", { ordered: true });
+      const file = pc.createDataChannel("file", { ordered: true });
+      openDataChannel(info, chat);
+      openDataChannel(info, file);
+      pc.createOffer()
+        .then((offer) => pc.setLocalDescription(offer))
+        .then(() => sendSignal(peerId, { type: "description", description: pc.localDescription }))
+        .catch(() => {});
+    } else {
+      pc.ondatachannel = (event) => openDataChannel(info, event.channel);
+    }
+
+    return info;
+  }
+
+  function handleSignal(from, payload, name) {
+    const info = createPeer(from, name, false);
+    const pc = info.pc;
+
+    if (payload.type === "description") {
+      pc.setRemoteDescription(payload.description)
+        .then(async () => {
+          if (payload.description.type === "offer") {
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            sendSignal(from, { type: "description", description: pc.localDescription });
+          }
+        })
+        .catch(() => {});
+    } else if (payload.type === "candidate") {
+      pc.addIceCandidate(payload.candidate).catch(() => {});
+    }
+  }
+
+  async function openPreview() {
+    stopMedia();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: state.devices.cameraId ? { deviceId: { exact: state.devices.cameraId } } : { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+        audio: state.devices.microphoneId ? { deviceId: { exact: state.devices.microphoneId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true } : { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+      els.previewVideo.srcObject = stream;
+      return stream;
+    } catch {
+      showToast("カメラ・マイクの利用許可を確認してください", 4500);
+      return null;
+    }
+  }
+
+  async function getLocalStream() {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: state.devices.cameraId ? { deviceId: { exact: state.devices.cameraId } } : { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
+      audio: state.devices.microphoneId ? { deviceId: { exact: state.devices.microphoneId }, echoCancellation: true, noiseSuppression: true, autoGainControl: true } : { echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+    });
+    state.localStream = stream;
+    state.cameraTrack = stream.getVideoTracks()[0] || null;
+    state.micTrack = stream.getAudioTracks()[0] || null;
+    addLocalTile();
+    updateCounts();
+  }
+
+  function stopMedia() {
+    if (state.localStream) state.localStream.getTracks().forEach(t => t.stop());
+    if (state.screenStream) state.screenStream.getTracks().forEach(t => t.stop());
+    state.localStream = null;
+    state.screenStream = null;
+    state.cameraTrack = null;
+    state.micTrack = null;
+    if (els.previewVideo.srcObject) {
+      els.previewVideo.srcObject.getTracks().forEach(t => t.stop());
+      els.previewVideo.srcObject = null;
+    }
+  }
+
+  async function connectSignaling() {
+    return new Promise((resolve, reject) => {
+      const proto = location.protocol === "https:" ? "wss" : "ws";
+      state.ws = new WebSocket(`${proto}://${location.host}`);
+      let opened = false;
+
+      state.ws.onopen = () => {
+        opened = true;
+        resolve();
+      };
+
+      state.ws.onmessage = async (event) => {
+        const msg = JSON.parse(event.data);
+        if (msg.type === "hello") state.peerId = msg.peerId;
+        if (msg.type === "joined") {
+          state.room = msg.room;
+          history.replaceState({}, "", `?room=${encodeURIComponent(state.room)}`);
+          els.roomLabel.textContent = state.room;
+          document.querySelector(".status-dot").style.background = "var(--ok)";
+          for (const p of msg.peers) {
+            state.peers.set(p.peerId, { peerId: p.peerId, name: p.name, pc: null });
+            createPeer(p.peerId, p.name, true);
+          }
+          updateCounts();
+          addChat("", `「${state.room}」へ参加しました。`, true);
+          if (!opened) resolve();
+        }
+        if (msg.type === "peer-joined") {
+          if (!state.peers.has(msg.peerId)) createPeer(msg.peerId, msg.name, true);
+          else state.peers.get(msg.peerId).name = msg.name;
+          updateCounts();
+          addChat("", `${msg.name || "参加者"} が参加しました。`, true);
+        }
+        if (msg.type === "peer-left") {
+          const name = displayName(msg.peerId);
+          addChat("", `${name} が退出しました。`, true);
+          removePeer(msg.peerId);
+        }
+        if (msg.type === "peer-profile") {
+          const peer = state.peers.get(msg.peerId);
+          if (peer) peer.name = msg.name;
+          const tile = document.querySelector(`[data-peer-tile="${msg.peerId}"]`);
+          tile?.querySelector(".name-chip") && (tile.querySelector(".name-chip").textContent = msg.name);
+          updateCounts();
+        }
+        if (msg.type === "signal") handleSignal(msg.from, msg.payload, msg.name);
+        if (msg.type === "room-full") {
+          showToast(`このルームは最大${msg.limit}人です`, 4500);
+          reject(new Error("room-full"));
+        }
+        if (msg.type === "error") showToast(msg.message || "接続エラー", 4500);
+      };
+
+      state.ws.onerror = () => reject(new Error("websocket"));
+      state.ws.onclose = () => {
+        if (state.room) showToast("シグナリング接続が切断されました");
+      };
+    });
+  }
+
+  function sendToAll(payload) {
+    for (const info of state.peers.values()) {
+      const channel = info.chat;
+      if (channel?.readyState === "open") channel.send(JSON.stringify(payload));
+    }
+  }
+
+  async function startCall() {
+    const roomFromUrl = new URLSearchParams(location.search).get("room");
+    els.joinModal.classList.remove("hidden");
+    els.roomInput.value = roomFromUrl || randomId("room-");
+    els.nameInput.value = localStorage.getItem("voxlink-name") || "";
+    const preview = await openPreview();
+    if (!preview) return;
+  }
+
+  async function joinRoom() {
+    const name = (els.nameInput.value.trim() || "Guest").slice(0, 40);
+    const room = (els.roomInput.value.trim() || randomId("room-")).slice(0, 64);
+    state.name = name;
+    localStorage.setItem("voxlink-name", name);
+
+    try {
+      await getLocalStream();
+      if (state.ws?.readyState === WebSocket.OPEN) state.ws.close();
+      await connectSignaling();
+      state.ws.send(JSON.stringify({ type: "join", name: state.name, room }));
+      await new Promise((resolve) => {
+        const t = setInterval(() => {
+          if (state.room === room) { clearInterval(t); resolve(); }
+        }, 25);
+        setTimeout(() => { clearInterval(t); resolve(); }, 5000);
+      });
+
+      els.joinModal.classList.add("hidden");
+      els.emptyState.classList.add("hidden");
+      els.callStage.classList.remove("hidden");
+      els.controlBar.classList.remove("hidden");
+      addLocalTile();
+      updateCounts();
+      loadDevices();
+    } catch {
+      showToast("通話を開始できませんでした。権限・接続を確認してください。", 5000);
+    }
+  }
+
+  function leaveCall() {
+    for (const peer of state.peers.values()) {
+      try { peer.pc?.close(); } catch {}
+    }
+    state.peers.clear();
+    if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: "leave" }));
+    try { state.ws?.close(); } catch {}
+    stopMedia();
+    els.videoGrid.innerHTML = "";
+    els.callStage.classList.add("hidden");
+    els.controlBar.classList.add("hidden");
+    els.emptyState.classList.remove("hidden");
+    els.roomLabel.textContent = "未接続";
+    document.querySelector(".status-dot").style.background = "#65708a";
+    state.room = "";
+    updateCounts();
+  }
+
+  async function toggleScreenShare() {
+    if (state.screenStream) {
+      const track = state.cameraTrack;
+      if (track) {
+        for (const info of state.peers.values()) {
+          const sender = info.pc?.getSenders().find(s => s.track?.kind === "video");
+          if (sender) await sender.replaceTrack(track);
+        }
+      }
+      state.screenStream.getTracks().forEach(t => t.stop());
+      state.screenStream = null;
+      addLocalTile();
+      els.screenBtn.classList.remove("active");
+      showToast("カメラへ戻しました");
+      return;
+    }
+
+    try {
+      const screen = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 30, max: 60 } },
+        audio: true
+      });
+      state.screenStream = screen;
+      const track = screen.getVideoTracks()[0];
+      track.onended = () => toggleScreenShare();
+      for (const info of state.peers.values()) {
+        const sender = info.pc?.getSenders().find(s => s.track?.kind === "video");
+        if (sender) await sender.replaceTrack(track);
+      }
+      const localVideo = document.querySelector('[data-peer-tile="local"] video');
+      if (localVideo) localVideo.srcObject = screen;
+      els.screenBtn.classList.add("active");
+      showToast("画面共有を開始しました");
+    } catch {
+      showToast("画面共有をキャンセルしました");
+    }
+  }
+
+  function toggleMic() {
+    if (!state.micTrack) return;
+    state.micTrack.enabled = !state.micTrack.enabled;
+    els.micBtn.classList.toggle("active", !state.micTrack.enabled);
+    els.micBtn.textContent = state.micTrack.enabled ? "🎙" : "🔇";
+  }
+
+  function toggleCam() {
+    if (!state.cameraTrack) return;
+    state.cameraTrack.enabled = !state.cameraTrack.enabled;
+    els.camBtn.classList.toggle("active", !state.cameraTrack.enabled);
+    els.camBtn.textContent = state.cameraTrack.enabled ? "▣" : "🚫";
+  }
+
+  async function toggleRecording() {
+    if (state.recording) {
+      state.recording.stop();
+      return;
+    }
+    if (!state.localStream) return;
+    const stream = state.screenStream || state.localStream;
+    let recordStream = new MediaStream();
+    stream.getVideoTracks().forEach(t => recordStream.addTrack(t));
+    state.localStream.getAudioTracks().forEach(t => recordStream.addTrack(t));
+
+    const mime = [
+      "video/webm;codecs=vp9,opus",
+      "video/webm;codecs=vp8,opus",
+      "video/webm"
+    ].find(MediaRecorder.isTypeSupported) || "";
+    let chunks = [];
+    try {
+      state.recording = new MediaRecorder(recordStream, mime ? { mimeType: mime } : undefined);
+      state.recording.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+      state.recording.onstop = () => {
+        const blob = new Blob(chunks, { type: state.recording.mimeType || "video/webm" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `voxlink-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`;
+        a.click();
+        URL.revokeObjectURL(a.href);
+        state.recording = null;
+        els.recordBtn.textContent = "● 録画";
+        els.recordBtn.classList.remove("active");
+        showToast("録画ファイルを保存しました");
+      };
+      state.recording.start(1000);
+      els.recordBtn.textContent = "■ 停止";
+      els.recordBtn.classList.add("active");
+      showToast("録画中：自分の映像/画面＋音声を記録しています");
+    } catch {
+      showToast("このブラウザでは録画を開始できません");
+      state.recording = null;
+    }
+  }
+
+  function sendChat() {
+    const text = els.chatInput.value.trim();
+    if (!text) return;
+    addChat(state.name, text);
+    sendToAll({ type: "chat", name: state.name, text });
+    els.chatInput.value = "";
+    els.chatInput.focus();
+  }
+
+  function showReaction(emoji) {
+    const node = document.createElement("div");
+    node.className = "reaction-pop";
+    node.textContent = emoji;
+    node.style.left = `${35 + Math.random() * 30}%`;
+    els.reactions.appendChild(node);
+    setTimeout(() => node.remove(), 1800);
+  }
+
+  function sendReaction() {
+    const choices = ["👍", "❤️", "😂", "🎉", "👏", "🔥", "😮"];
+    const emoji = choices[Math.floor(Math.random() * choices.length)];
+    showReaction(emoji);
+    sendToAll({ type: "reaction", emoji });
+  }
+
+  function addTransfer(file, text, progress = 0) {
+    const id = randomId("file-");
+    const el = document.createElement("div");
+    el.className = "transfer";
+    el.dataset.transfer = id;
+    el.innerHTML = `
+      <div class="transfer-row"><strong></strong><span class="muted"></span></div>
+      <div class="muted transfer-status" style="margin-top:5px"></div>
+      <div class="progress"><div></div></div>`;
+    el.querySelector("strong").textContent = file.name;
+    el.querySelector(".transfer-row .muted").textContent = formatBytes(file.size);
+    el.querySelector(".transfer-status").textContent = text;
+    el.querySelector(".progress > div").style.width = `${progress * 100}%`;
+    els.fileTransfers.prepend(el);
+    return el;
+  }
+
+  function formatBytes(bytes) {
+    if (!bytes) return "0 B";
+    const units = ["B", "KB", "MB", "GB"];
+    const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+    return `${(bytes / Math.pow(1024, index)).toFixed(index ? 1 : 0)} ${units[index]}`;
+  }
+
+  async function sendFile(file) {
+    if (!file || !state.peers.size) {
+      showToast("ファイル送信には参加者が必要です");
+      return;
+    }
+
+    const CHUNK = 16 * 1024;
+    const fileId = randomId("f-");
+
+    for (const info of state.peers.values()) {
+      if (!info.file || info.file.readyState !== "open") continue;
+
+      const ui = addTransfer(file, `${info.name} へ送信中…`, 0);
+      info.file.send(JSON.stringify({ type: "file-meta", id: fileId, name: file.name, size: file.size, mime: file.type }));
+      let offset = 0;
+      while (offset < file.size) {
+        const end = Math.min(offset + CHUNK, file.size);
+        const buf = await file.slice(offset, end).arrayBuffer();
+        await waitForBuffer(info.file);
+        info.file.send(JSON.stringify({ type: "file-chunk", id: fileId, chunk: buf.byteLength }));
+        info.file.send(buf);
+        offset = end;
+        ui.querySelector(".progress > div").style.width = `${(offset / file.size) * 100}%`;
+      }
+      await waitForBuffer(info.file);
+      info.file.send(JSON.stringify({ type: "file-end", id: fileId }));
+      ui.querySelector(".transfer-status").textContent = `${info.name} へ送信完了`;
+    }
+  }
+
+  function waitForBuffer(channel) {
+    if (channel.bufferedAmount < 2 * 1024 * 1024) return Promise.resolve();
+    return new Promise(resolve => {
+      const prev = channel.onbufferedamountlow;
+      channel.bufferedAmountLowThreshold = 512 * 1024;
+      channel.onbufferedamountlow = () => {
+        channel.onbufferedamountlow = prev;
+        resolve();
+      };
+    });
+  }
+
+  function prepareIncomingFile(info, meta) {
+    info.incoming.set(meta.id, { ...meta, chunks: [], received: 0 });
+    const fakeFile = { name: meta.name, size: meta.size };
+    addTransfer(fakeFile, `${info.name} から受信中…`, 0);
+  }
+
+  function receiveFileChunk(msg) {
+    // Chunk-count metadata is followed by the raw ArrayBuffer in this implementation.
+    // Binary payloads are handled by the onmessage hook below.
+  }
+
+  function handleBinary(info, data) {
+    const ids = [...info.incoming.keys()];
+    const latest = ids[ids.length - 1];
+    if (!latest) return;
+    const item = info.incoming.get(latest);
+    if (!item) return;
+    item.chunks.push(data);
+    item.received += data.byteLength;
+    const all = [...els.fileTransfers.children].find(x => x.querySelector("strong")?.textContent === item.name);
+    if (all) {
+      all.querySelector(".progress > div").style.width = `${Math.min(100, (item.received / item.size) * 100)}%`;
+      all.querySelector(".transfer-status").textContent = `${info.name} から受信中… ${Math.round(item.received / item.size * 100)}%`;
+    }
+  }
+
+  function finishIncomingFile(msg, info) {
+    const item = info.incoming.get(msg.id);
+    if (!item) return;
+    const blob = new Blob(item.chunks, { type: item.mime || "application/octet-stream" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = item.name;
+    a.click();
+    URL.revokeObjectURL(a.href);
+    info.incoming.delete(msg.id);
+    const all = [...els.fileTransfers.children].find(x => x.querySelector("strong")?.textContent === item.name);
+    if (all) all.querySelector(".transfer-status").textContent = `${info.name} から受信完了`;
+    showToast(`${item.name} を受信しました`);
+  }
+
+  function attachFileBinaryHandler(info) {
+    // Replace generic message handler with a handler that also accepts binary frames.
+    if (!info.file) return;
+    info.file.binaryType = "arraybuffer";
+    info.file.onmessage = (e) => {
+      if (typeof e.data === "string") {
+        try {
+          const msg = JSON.parse(e.data);
+          if (msg.type === "file-meta") prepareIncomingFile(info, msg);
+          if (msg.type === "file-end") finishIncomingFile(msg, info);
+        } catch {}
+      } else {
+        handleBinary(info, e.data);
+      }
+    };
+  }
+
+  async function loadDevices() {
+    try {
+      const list = await navigator.mediaDevices.enumerateDevices();
+      const fill = (sel, devices, activeId) => {
+        sel.innerHTML = "";
+        devices.forEach((d, index) => {
+          const opt = document.createElement("option");
+          opt.value = d.deviceId;
+          opt.textContent = d.label || `${d.kind} ${index + 1}`;
+          if (d.deviceId === activeId) opt.selected = true;
+          sel.appendChild(opt);
+        });
+      };
+      fill(els.micSelect, list.filter(d => d.kind === "audioinput"), state.devices.microphoneId);
+      fill(els.camSelect, list.filter(d => d.kind === "videoinput"), state.devices.cameraId);
+      fill(els.speakerSelect, list.filter(d => d.kind === "audiooutput"), state.devices.speakerId);
+    } catch {}
+  }
+
+  async function applyDevices() {
+    state.devices.microphoneId = els.micSelect.value;
+    state.devices.cameraId = els.camSelect.value;
+    state.devices.speakerId = els.speakerSelect.value;
+
+    try {
+      const next = await navigator.mediaDevices.getUserMedia({
+        video: state.devices.cameraId ? { deviceId: { exact: state.devices.cameraId } } : true,
+        audio: state.devices.microphoneId ? { deviceId: { exact: state.devices.microphoneId } } : true
+      });
+
+      const nextVideo = next.getVideoTracks()[0];
+      const nextAudio = next.getAudioTracks()[0];
+
+      for (const info of state.peers.values()) {
+        if (nextVideo) {
+          const sender = info.pc.getSenders().find(s => s.track?.kind === "video");
+          if (sender) await sender.replaceTrack(nextVideo);
+        }
+        if (nextAudio) {
+          const sender = info.pc.getSenders().find(s => s.track?.kind === "audio");
+          if (sender) await sender.replaceTrack(nextAudio);
+        }
+      }
+
+      state.localStream?.getTracks().forEach(t => t.stop());
+      state.localStream = next;
+      state.cameraTrack = nextVideo;
+      state.micTrack = nextAudio;
+
+      if (state.screenStream) {
+        const shareTrack = state.screenStream.getVideoTracks()[0];
+        if (shareTrack) {
+          for (const info of state.peers.values()) {
+            const sender = info.pc.getSenders().find(s => s.track?.kind === "video");
+            if (sender) await sender.replaceTrack(shareTrack);
+          }
+        }
+      }
+
+      addLocalTile();
+      if ("setSinkId" in HTMLMediaElement.prototype && state.devices.speakerId) {
+        document.querySelectorAll(".video-tile video:not(.local)").forEach(v => v.setSinkId(state.devices.speakerId).catch(() => {}));
+      }
+      showToast("デバイス設定を適用しました");
+      els.settingsModal.classList.add("hidden");
+    } catch {
+      showToast("デバイスを切り替えられませんでした");
+    }
+  }
+
+  function cycleLayout() {
+    const layouts = ["grid", "speaker", "focus"];
+    state.layout = layouts[(layouts.indexOf(state.layout) + 1) % layouts.length];
+    els.videoGrid.dataset.layout = state.layout;
+    els.layoutBtn.textContent = state.layout === "grid" ? "⊞ グリッド" : state.layout === "speaker" ? "▣ スピーカー" : "▦ フォーカス";
+  }
+
+  async function openPip() {
+    const video = document.querySelector(".video-tile:not(.local) video") || document.querySelector(".video-tile.local video");
+    if (!video) return;
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else if (video.requestPictureInPicture) {
+        await video.requestPictureInPicture();
+      }
+    } catch {
+      showToast("Picture-in-Pictureを利用できません");
+    }
+  }
+
+  async function fullscreen() {
+    try {
+      if (!document.fullscreenElement) await els.callStage.requestFullscreen();
+      else await document.exitFullscreen();
+    } catch {
+      showToast("全画面表示を利用できません");
+    }
+  }
+
+  els.startBtn.addEventListener("click", startCall);
+  els.closeJoinBtn.addEventListener("click", () => els.joinModal.classList.add("hidden"));
+  els.joinBtn.addEventListener("click", joinRoom);
+  els.randomRoomBtn.addEventListener("click", () => { els.roomInput.value = randomId("room-"); });
+  els.leaveBtn.addEventListener("click", leaveCall);
+  els.micBtn.addEventListener("click", toggleMic);
+  els.camBtn.addEventListener("click", toggleCam);
+  els.screenBtn.addEventListener("click", toggleScreenShare);
+  els.reactionBtn.addEventListener("click", sendReaction);
+  els.pipBtn.addEventListener("click", openPip);
+  els.fullscreenBtn.addEventListener("click", fullscreen);
+  els.recordBtn.addEventListener("click", toggleRecording);
+  els.sendChatBtn.addEventListener("click", sendChat);
+  els.chatInput.addEventListener("keydown", e => { if (e.key === "Enter") sendChat(); });
+  els.fileBtn.addEventListener("click", () => els.fileInput.click());
+  els.fileInput.addEventListener("change", e => { const file = e.target.files?.[0]; if (file) sendFile(file); e.target.value = ""; });
+  els.roomBadge.addEventListener("click", async () => {
+    if (!state.room) return;
+    await navigator.clipboard?.writeText(location.href);
+    showToast("ルームリンクをコピーしました");
+  });
+  els.inviteBtn.addEventListener("click", async () => {
+    if (!state.room) return;
+    try {
+      await navigator.clipboard.writeText(location.href);
+      showToast("招待リンクをコピーしました");
+    } catch { showToast(location.href, 5000); }
+  });
+  els.settingsBtn.addEventListener("click", async () => { await loadDevices(); els.settingsModal.classList.remove("hidden"); });
+  els.closeSettingsBtn.addEventListener("click", () => els.settingsModal.classList.add("hidden"));
+  els.applyDevicesBtn.addEventListener("click", applyDevices);
+  els.layoutBtn.addEventListener("click", cycleLayout);
+
+  document.querySelectorAll(".tab").forEach(tab => tab.addEventListener("click", () => {
+    document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+    tab.classList.add("active");
+    qs(`tab-${tab.dataset.tab}`).classList.add("active");
+  }));
+
+  navigator.mediaDevices?.addEventListener("devicechange", loadDevices);
+
+  window.addEventListener("beforeunload", () => {
+    try { if (state.ws?.readyState === WebSocket.OPEN) state.ws.send(JSON.stringify({ type: "leave" })); } catch {}
+  });
+
+  // Deep-link room support.
+  const initialRoom = new URLSearchParams(location.search).get("room");
+  if (initialRoom) els.roomInput.value = initialRoom;
+})();
